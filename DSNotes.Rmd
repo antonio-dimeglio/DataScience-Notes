@@ -931,11 +931,13 @@ The following code is used to compare Logistic Regression, K-nearest Neighbors, 
 The dataset comes from a differential gene expression experiment, and we are tasked into classifing samples into either 0 (AML) or 1 (ALL) 
 
 
-```{r}
+```{r eval=FALSE}
 library(class)
 library(klaR)
 library(MASS)
-load("assignment.rdata") #before doing this check that your cwd is the same one where the file is stored
+setwd("C:\\Users\\anton\\Desktop\\Uni\\Data Science\\DS Notes\\DataScience-Notes")
+# Before loading the  check that your wd is the same one where the file is stored
+load("assignment.rdata")
 set.seed(1234)
 n.train <- nrow(train)
 n.test <- nrow(test)
@@ -1023,3 +1025,580 @@ misc(y.hat.naive.g, true.class)
 misc(y.hat.naive.k, true.class)
 misc(y.hat.lda, true.class)
 ```
+
+# Model Selection and Regularization 
+
+Ideally, when building a model, we want the number of parameters $p$ to be significantly smaller than the number of samples $n$, i.e. $n >>p$.
+
+
+Unfortunately, this can often not be the case; for method such as the least squares estimates a $n$ sligthly larger than $p$ results in model overfitting and high variance, and in the case of $n<p$ the model cannot be fit at all.
+
+Luckily constraining or shrinking the coefficients of estimation can substantially reduce the variance, with the result of only a slight increase in bias.
+
+Removing superfluous variables from the model results also in an easier interpretation of the model.
+
+Three different approaches can be used for variable selection:
+
+- __Subset selection__: a subset of $p$ predictors is choosen, and a model is fit using only the subset
+
+- __Shrinkage__: in shrinkage all parameters are included in the model, but they are shrinked based on the least squares estimates; it reduces the variance.
+
+- __Dimension reduction__: the array of parameters $p$ are projected into a $M$-dimensional subspace where $M < p$, linear combinations of $M$ obtained from the projection are then used as predictors.
+
+These different approaches will be shown using the ```prostate``` dataset, found in the ```ElemStatLearn``` library.
+The goal is to predict the prostate specific antigen, or ```psa```, of a patients given a set of parameters; given that we want to predict a real value and not a class this is a regression problem.
+
+```{r}
+library(ElemStatLearn)
+data(prostate)
+
+names(prostate)
+summary(prostate)
+```
+
+## Subset Selection
+
+#### Best Subset Selection 
+The first approach one would think of is to simply try all possible combinations of parameters and see which one yields the best results(using one or more metric for measurement of quality of a model).
+
+Unfortunately, while possible (and also the best way in terms of quality of searching for a subset of parameters), it is computationally expensive, and in some cases the time required to do so would be too much: for a given model with $p$ parameters we would have $2^p$ possible combinations of parameters.
+
+Furthermore, if we use as a metric the _RSS_ or $R^2$ we will always end up with a model with all the parameters, as those values decrease and increase monotonically respectively. 
+To evaluate a model we either use cross-validation prediction error, AIC, BIC or the adjusted $R^2$ as measurement.
+
+### Stepwise Selection 
+This approach compares a lower subset of parameters compared to the best subset selection.
+
+Different options for stepwise selection are:
+
+- Forward Stepwise selection 
+- Backward Stepwise selection
+- Hybrid Stepwise selection
+
+#### Forward Stepwise selection
+The forward stepwise selection consists in:
+
+- Defining an initial model $\mathcal{M}_0$, which is a model with 0 parameters 
+
+- Iterate from 1 up to $p-1$ and, by considering all possible model that can be built using $k$ parameters, select the best one among them, denoted as $\mathcal{M}_k$; the best model in each iteration is found by comparing RSS or $R^2$
+
+- Finally, select the best model among all models $\mathcal{M}_0, ..., \mathcal{M}_p$ by using a metric such as cross validation error, AIC, BIC or adjusted $R^2$
+
+This approach does work if $n<p$, unless the model is a linear regression.
+The best model may not necessarily be the one that we would find using best subset selection.
+ 
+#### Backward Stepwise selection 
+The backward stepwise selection consists in 
+
+- Defining an initial model $\mathcal{M}_p$, the model using all parameters
+
+- By iterating from $k = p$ down to $k = 1$, select the best model with parameters $k$, denoted as $\mathcal{M}_{k-1}$, where best is found based on the smallest RSS or highest $R^2$
+
+- Finally, select the best model among all models $\mathcal{M}_p, ..., \mathcal{M}_0$, based on AIC, BIC, or adjusted $R^2$
+
+This approach requires $n>p$.
+
+#### Hybrid Stepwise Selection 
+
+The hybrid approach consists in following a forward approach as the model starts being built using 0 parameters and at each iteration a new variable is added, but some variable may also be removed if they do not improve the model fit.
+
+Here is an implementation of all three approaches:
+```{r}
+library(ElemStatLearn)
+data(prostate)
+library(leaps) #library containing the functions necessary for model selection
+
+x <- prostate[, -ncol(prostate)] #The last columns is removed 
+
+full.model <- regsubsets(lpsa~., x)
+full.model.summary <- summary(full.model)
+
+full.model.summary$adjr2 #Adjusted r^2
+# According to the adjusted r^2 the best model is given by a model with 7 parameters, including the intercept
+
+par(mfrow=c(1, 3))
+plot(full.model.summary$adjr2, xlab = "N. variables", ylab="Adjusted R^2")
+plot(full.model.summary$bic, xlab = "N. variables", ylab="BIC")
+plot(full.model.summary$cp, xlab = "N. variables", ylab="CP")
+
+#Forward, backward and hybrid stepwise selection is performed 
+model.forward <- regsubsets(lpsa~., x, method="forward")
+summary(model.forward)
+
+model.backward <- regsubsets(lpsa~., x, method="backward")
+summary(model.backward)
+
+model.hybrid <- regsubsets(lpsa~., x, method="seqrep")
+summary(model.hybrid)
+
+# Validation approaches: 1. Validation set 
+set.seed(1234)
+n <- nrow(x)
+test<-sample(c(TRUE,FALSE),n,replace = T)
+regfit.best <- regsubsets(lpsa~., data=x[!test, ])
+
+# To perform the validation, a matrix object is required
+test.mat <- model.matrix(lpsa~., data = x[test,])
+
+
+mse <- rep(NA, 8) #8 is the total number of parameters including the intercept
+for (i in 1:8){
+  coeffs <- coef(regfit.best, id = i) #we take the coefficients selected at step i from the function
+  y.hat <- test.mat[,names(coeffs)] %*% coeffs #from the matrix we take the coefficient at step i and multiply them with the matrix of test values 
+  mse[i] <- mean((x$lpsa[test]-y.hat)^2)
+}
+
+mse 
+which.min(mse)
+
+plot(mse, type="l")
+
+
+# Validation approaches 2: via k-fold CV (k = 5)
+
+
+k <- 5
+set.seed(1234)
+folds <- sample(1:k, n, replace=T)
+
+predict.regsubsets<-function(object, newdata, id, ...){
+
+  form <- as.formula(object$call[2])
+
+  test.mat<-model.matrix(form, data=newdata)
+
+  coeffs <- coef(object, id=id)  
+  
+
+  return (test.mat[, names(coeffs)] %*% coeffs)
+}
+
+
+predict.regsubsets<-function(object,newdata,id,...){
+  # This function is used to implement prediction for objects coming from the 
+  # regsubsets function.
+  
+  # The first step is to define a formula for the prediction, which is the same 
+  # used for the model definition 
+  form<-as.formula(object$call[[2]])
+  # Then, just like before, the new data is put into a matrix which has the same 
+  # shape as the formula used for the model
+  test.mat<-model.matrix(form,data=newdata)
+  # The coefficients estimated by the model are copied from the object
+  coeffs<-coef(object,id=id) # 
+  # The prediction is computed via matrix multiplication
+  # In particular, from the matrix of data we take the columns corresponding to 
+  # the parameters of the model and multiply with its estimated coefficients 
+  test.mat[,names(coeffs)]%*%coeffs
+}
+
+# for each fold k we are going to compute a partial model with p parameters up 
+# to 5 folds and 8 parameters 
+p<-8
+cv.err <- matrix(NA, k, ncol=8)
+for (i in 1:k){
+  best.fit <- regsubsets(lpsa~., data=x[folds!=i, ])
+  for (j in 1:p){
+    y.hat<-predict.regsubsets(best.fit, newdata=x[folds==i,], id=j)
+    cv.err[i, j] <- mean((y.hat-x$lpsa[folds==i])^2)
+  }
+}
+
+# We can plot the MSE average per each k by doing
+plot(apply(cv.err, 2, mean), type="l")
+# The lowest MSE is obtained when 3 parameters are used, namely
+coef(best.fit, id=3)
+```
+
+## Shrinkage Methods 
+
+An alternative approach to selecting a subset of parameters we can instead select all parameters and shrink their estimate towards zero or regularizes them.
+The two best known techniques for shrinking regression coefficients towards zero are the __ridge regression__ and the __lasso__.
+
+#### Ridge regression 
+The ridge regression is similar to the Least Squares method in that it try to 
+minimise a function.
+The least squares method tries to minimise the RSS, which is 
+$$RSS = \sum_{i=1}^{n}(y_i - \hat{f}(x))^2$$
+
+where 
+
+$$\hat{f}(x) = \beta_0 + beta_1{x_i} + ... + \beta_{j}x_i$$
+
+The ridge regression instead minimises the function
+
+$$RSS+\lambda\sum_{j=1}^p\beta_j^2$$
+
+where $\lambda \geq 0$ is a tuning parameter, called __shrinkage penalty__.
+
+If $\lambda = 0$ then the penalty has no effect, so the estimates are going to
+be computed via least squares estimates
+
+As $\lambda \rightarrow \infty$ the coefficients will approach zero.
+
+To avoid having models with huge or very small adjusted coefficients it is 
+important to standardise the predictors.
+
+The advantage of the ridge regression is due to the bias-variance tradeoff; as 
+$\lambda$ increases the the model becomes less flexible, resulting in a reduced
+variance but slightly higher bias.
+
+On the contrary, if the relationship between response and predictors is close
+to linear, there will be low bias but high variance in the model via least
+squares estimates.
+
+Furthermore, in the case of $p>n$ the ridge regression can still be applied and 
+it performs well, the results obtained will have a slightly higher bias but a big
+decrease in variance.
+
+This methods performs best in the case of high variance with least squares 
+estimates.
+
+#### Lasso 
+A disadvantage of the ridge regression is that it includes all $p$ predictors, as
+the shrinkage penalty will set coefficients toward zero, but not exactly to zero.
+This can be a problem in the case of datasets where $p$ is large.
+
+The lasso coefficient is an alternative to ridge regression that overcomes this 
+disadvantage. It tries to minimise the quantity 
+$$RSS +\lambda\sum_{j=1}^{p}|\beta_j|$$
+This method also assumes that parameters are standardised.
+
+The operation $|\beta_j$ is known as $\mathcal{l}_1$norm, and is computed as the 
+sum of magnitudes of a vector.
+
+For example, given $X = [3, 4]$, then $||x||_2 = 3 + 4 = 7$.
+It's a measure of distance from the origin.
+
+As the lasso regression produces a model with parameters set to zero, it is said
+to be an algorithm that yields __sparse__ models.
+
+The ridge regression is instead based on the $\mathcal{l}_2$-norm, which is 
+simply the Euclidean distance of a vector to the origin.
+
+Intuitively, suppose we have a parameter $s$ which represents the upper boundary
+for the function we would like to minimize, then
+
+$$\text{Lasso minimizes RSS, which depends on} \sum_{j=1}^p|\beta_j| \leq s$$
+
+$$\text{Ridge minimizes RSS, which depends on} \sum_{j=1}^p\beta_j^2 \leq s$$
+
+A geometric representation of this can be done for the case in which $p = 2$:
+
+The RSS can be plotted on a Cartesian plot as an ellipse, while the ridge 
+constraint $|\beta_1|+ |\beta_2|$ plot is a diamond and 
+$\beta_1^2 + \beta_2^2$ plots is a circle.
+
+What we are interested in is finding values for the coefficients such that the 
+plotted RSS overlaps the plotted figure of the ridge/lasso.
+![](RidgeLasso.jpg)
+
+As we can see from the image, given the shape of the two functions, in the lasso
+the first point at which the two point could overlap is on the 0 of either 
+$\beta_1$ or $\beta_2$, hence one of the two coefficients will be set to 0; 
+the same cannot be said about the shape of the ridge regression.
+
+This condition is also true if $p>2$, and in some cases multiple coefficient 
+estimates could be set to 0.
+
+There is no method that works better, and to understand which shrinkage method
+works best cross-validation can be used to determine the best approach for a 
+given dataset.
+Furthermore, selection of $\lambda$ can be done via cross-validation.
+
+It is important to not that generally lasso performs better in the case of small
+$p$ and a few coefficients have substantial values while the rest are either 
+close to or zero. 
+
+Code to perform Ridge and Lasso regression:
+```{r}
+library(ElemStatLearn)
+data("prostate")
+
+x <- model.matrix(lpsa~., data = prostate[,-length(prostate)])[, -1] #the intercept is removed
+y <- prostate$lpsa
+
+#install.packages('glmnet')
+library(glmnet)
+
+grid <- 10^(seq(10, -2, length=100)) #grid of values to use for lambda
+
+#the glmnet function requires the x and y as arguments
+#alpha = 0 indicates that we want to perform ridge 
+#alpha = 1 indicates that we want to perform lasso 
+model.ridge <- glmnet(x,y, alpha = 0, lambda=grid) 
+
+
+coef(model.ridge)[c(1, 50, 100)] # Coefficient for lambda = 1, 5 and 100
+
+# Coefficients predictions with lambda[50]
+predict(model.ridge, s = 50, type = "coefficients")
+
+
+# Validation set and prediction of MSE for ridge regression with lambda = 4 
+set.seed(1234)
+train<-sample(1:nrow(x), nrow(x)/2, replace=F)
+
+model.ridge <- glmnet(x=x[train, ], y=y[train], alpha=0, lambda=grid)
+pred.ridge <- predict(model.ridge, newx=x[-train, ], s = 4)
+mean((y[-train]-pred.ridge)^2) #Mean Squared Error
+
+# Lets compare the results with Least squares 
+model.lm <- lm(lpsa~., data=prostate[train, -ncol(prostate)])
+pred.lm <- predict(model.lm, newdata=prostate[-train, -ncol(prostate)])
+mean((y[-train]-pred.lm)^2) # Much better results with linear model with all values
+
+model.lasso <- glmnet(x=x[train, ], y=y[train], alpha=1, lambda=grid)
+pred.lasso <- predict(model.lasso, newx=x[-train, ])
+
+# As the value of L1 increases (i.e. it becomes more permissive)
+# the model uses more and more complete coefficients (top X-axis)
+plot(model.lasso)
+
+# Lambda tuning can be done via CV 
+set.seed(1234)
+cv.out <- cv.glmnet(x[train, ], y[train], alpha=1)
+
+
+# cross validation can be done directly using cv.glmnet, to find the best.lambda
+model.lasso <- cv.glmnet(x=x[train, ], y=y[train], alpha=1)
+plot(model.lasso)
+
+model.ridge <- cv.glmnet(x=x[train, ], y=y[train], alpha=0)
+plot(model.ridge)
+
+# Using the coefficients obtain the model can be refit
+model.lasso <- glmnet(x=x[train, ], y=y[train], alpha=1, lambda=grid)
+pred.lasso <- predict(model.lasso, type="coefficients", a=model.lasso$lambda.min)
+pred.lasso
+
+```
+
+### Dimensionality Reduction
+The subset selection model works by selection the set of parameters to use, while
+the shrinking methods work by shrinking coefficients towards zero.
+
+The dimensionality reduction approach instead works by transforming the predictors
+and then, by using the transformed predictors, a least squares model is fit.
+
+#### PCA (Principal Component Analysis)
+Suppose that we have a dataset containing a set of predictors $p$ which are all 
+correlated.
+
+Given a sample of size $n$ having $p$ parameters what PCA tries to do is to 
+take $p$ parameters, which yield a $p$ dimensional vector of parameters 
+and project them onto an $m$ dimensional space.
+
+To do so, the data is first normalised by subtracting by its mean and dividing
+by the standard deviation; if we were to plot the points by using two parameters
+of the data they will become centered around the origin.
+
+The next step is to draw a random line passing through the origin and then try
+to rotate it until it fits well enough the data: "well enough" is measured by
+projecting the points on the plot to the line drawn. 
+
+Then we check how far the projected points are from the origin, the line we are
+interested in is the one that maximises this distance.
+
+More precisely, to measure the distance between the points and the origin each
+distance from the projected line to the origin is first squared and then summed
+(Sum of squared distances).
+
+The algorithms repeats these steps until the largest sum is obtained.
+
+The line obtained is called Principal Component  or PC1, and what we are interested in
+is the slope of the line: if we have two parameters $p_1$ and $p_2$, with a slope
+with value $0.25$ then if there is a 4 unit increase for $p_1$ there will be an
+increase of 1 unit for $p_2$, meaning that the most variance is found for $p_1$.
+
+the variance in units between $p_1$ and $p_2$ tells us how important $p_1$ and
+$p_2$ are to describe the variance of the data.
+
+To express the relation between the parameters as a 1 unit increase on the 
+line the pythagorean theorem is used, i.e. $\sqrt{p_1^2+p_2^2}$.
+
+Following the example of 4 and 1, the result obtained is 4.12 and then each value
+is scaled, so $ x= \frac{4}{4.12}$ and $y= \frac{1}{4.12}$ are the coordinates 
+for the unit vector increase on the line.
+
+This unit vector is the __eigenvector__ of PC1, and the sum of squared of the
+distances the __eigenvalue__.
+
+PC2 is going to be obtained directly by finding the line perpendicular to PC1.
+
+Using the $M$ components obtained via PCA regression can be performed, specifically
+Principal component regression, were the estimates are multiplied by the principal 
+components; keep in mind that PCA is a dimensionality reduction method and PCR
+pcr is a regression method, not a feature selection one.
+
+The number of principal components $M$ to use for PCR is chosen typically via 
+cross-validation.
+
+Here is the code to perform pcr 
+```{r}
+library(pls)
+library(ElemStatLearn)
+data(prostate)
+
+# The pcr function accepts a formula
+# after specifying the data we ask
+# the function to scale each parameter
+# and to perform validation via cross-validation
+pcr.fit <- pcr(lpsa~., data=prostate[, -ncol(prostate)], scale=T, validation="CV")
+summary(pcr.fit)
+# Mean squared error
+validationplot(pcr.fit, val.type = "MSEP", legendpos="top")
+
+
+# This function allows for the selection of the best number of components 
+# by selecting the model with the least amount of components that is less than 
+# one std away from the best overall model,
+selectNcomp(pcr.fit,method="onesigma",plot=T)
+
+# The randomization approach instead uses a permutation approach in which 
+# it is tested if by adding or removing a component is beneficial at all
+selectNcomp(pcr.fit,method="randomization",plot=T)
+
+set.seed(1234)
+pcr.fit<-pcr(lpsa~.,data=prostate[,-ncol(prostate)],
+             subset=train,scale=T,validation="CV")
+validationplot(pcr.fit,value="MSEP",legendpos="top")
+summary(pcr.fit)
+
+pcr.pred<-predict(pcr.fit,prostate[test,1:8],ncomp=5)
+mean((pcr.pred-y[test])^2)
+```
+
+Here instead we use PCA for the purpose of classification:
+
+```{r}
+load("colon_data.rdata")
+library(glmnet)
+library(ggplot2)
+
+# The training data consists of 42 distinct variables, and 2000 entries, the 
+# analysis of this data may be very computationally intensive, so we can 
+# perform dimensionality reduction and shrinking to see which approach works
+# best
+
+y <- as.factor(train$y)
+x <- as.matrix(train[, -1])
+x.test <- as.matrix(test[, -1])
+
+grid <- 10^seq(10, -2, length = 100)
+lasso.model <- glmnet(x=x, y=y, family="binomial", alpha=1, lambda = grid)
+
+# To choose the best lambda we use cross validation 
+
+lasso.cv <- cv.glmnet(x=x, y=y, alpha=1, family="binomial")
+plot(lasso.cv)
+best.lambda <- lasso.cv$lambda.min
+
+# using the best lambda we estimate the regression coefficients 
+y.hat <- predict(lasso.model, s=best.lambda, type="coefficients")
+
+misc <- function(y.hat, y.true){
+  mean(y.hat != y.true)
+}
+
+y.hat <- predict(lasso.model, newx=x.test, s=best.lambda, type="response")
+y.hat <- ifelse(y.hat > 0.5, 1, 0)
+y.hat <- as.factor(y.hat)
+
+misc(y.hat, test$y)
+```
+```{r echo=FALSE}
+scaled.x <- scale(x, T, T)
+
+# 5-fold CV using PCs for classification 
+K <- 5 
+cv.err <- matrix(NA, K, 25)
+set.seed(1234)
+
+
+# These valeus are changed onto factor and matrix to be used by the functions 
+# we are going to call 
+y <- as.factor(train$y)
+x <- as.matrix(train[, -1])
+
+folds <- sample(1:5, nrow(x), replace=T)
+
+# We are going to first iterate over the number of folds
+for (i in 1:K){
+  x.train <- x[folds!=i, ]
+  y.train <- y[folds!=i]
+  
+  x.test <- x[folds==i, ]
+  y.test <- y[folds==i]
+  
+  # The pc loadings are given by the svd functions
+  # we are interested only in the attribute v
+  svd.scaled.x <- svd(x.train)
+  pc.loadings <- svd.scaled.x$v 
+  
+  # Then we are going to iterate over the number of possible components we could
+  # use
+  for (j in 1:25){
+    # using the obtained pc.loadings we multiply (Starting from only a single component up to 25)
+    # by the training data matrix and the test data matrix
+    scaled.x.train <- as.matrix(x.train) %*% pc.loadings[, 1:j]
+    scaled.x.test<- as.matrix(x.test) %*% pc.loadings[, 1:j]
+    
+    # To use the data obtained we create a dataframe 
+    # on the dataframe obtained we are going to create a logistic regression model
+    # and compute for each number of components of each fold the misclassification
+    # error rate
+    data.svd <- data.frame(y=c(y.train, y.test), rbind(scaled.x.train, scaled.x.test))
+    out.pcs<-glm(y~.,data=data.svd,subset=1:nrow(scaled.x.train),
+                 family="binomial",maxit=100)
+    phat<-predict(out.pcs,newdata=data.svd[(nrow(scaled.x.train)+1):nrow(data.svd),],
+                  type="response")
+    yhat<-factor(ifelse(phat>0.5,1,0),levels=0:1)
+    cv.err[i,j]<-misc(yhat,y.test)
+  }
+}
+
+```
+
+```{r}
+best_no<-which.min(colMeans(cv.err))
+plot(colMeans(cv.err)) #with 7 components we obtain a cv.err < 0.20
+```
+
+## Bootstrap
+
+The bootstrap is a technique which, via resampling, can measure the accuracy of
+an estimator (for example the bias or variance estimator).
+
+This method is used for a wide set of estimators, as it can be applied even for
+model for which the estimation of parameters can be difficult to obtain.
+
+The algorithm is very sample:
+
+- Given a dataset with $n$ entries, a training set $Z = (z_1, z_2, ...\;, z_n)$
+where each $z_i = (x_i, y_i)$ we create $B$ training set by resampling with 
+replacement (i.e. the same element could be find more than once in the bootstrap
+dataset) and then for each training set a model is fit.
+
+The models obtained via bootstrapping can then be used to examine the behaviour
+of one or more sampling estimator.
+
+To estimate the prediction error of our model we could use the aforementioned 
+approach of generating $B$ resampling set and fit $B$ models on it, unfortunately
+this approach yields model that fit too well the training data, as we use the
+generated data for training and the actual training dataset as a test set for 
+the bootstrap generated model.
+
+To solve this issue cross-validation can be applied to the model fit of the 
+bootstrap models.
+
+In practical terms, using the bootstrap approach in R consists of two simple steps:
+
+- Define a function to be estimated via bootstrapping such as the mcer (mean 
+classification error rate)
+
+- Pass the function to the function ```boot```
+
+# Tree based methods 
+Decision trees provide a different approach for regression and classification 
+methods by stratifying the predictor space into a number 
